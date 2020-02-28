@@ -15,6 +15,10 @@ function _changeReadyState(readyState) {
   _triggerEvent.call(this, 'readystatechange')
 }
 
+function _isRelativePath(url) {
+  return !(/^(http|https|ftp|wxfile):\/\/.*/i.test(url));
+}
+
 export default class XMLHttpRequest {
   // TODO 没法模拟 HEADERS_RECEIVED 和 LOADING 两个状态
   static UNSEND = 0
@@ -38,12 +42,15 @@ export default class XMLHttpRequest {
   readyState = 0
   response = null
   responseText = null
-  responseType = ''
   responseXML = null
   status = 0
   statusText = ''
   upload = {}
   withCredentials = false
+
+  response = null
+  responseType = 'text'
+  dataType = 'string'
 
   constructor() {
     _requestHeader.set(this, {
@@ -89,24 +96,38 @@ export default class XMLHttpRequest {
   send(data = '') {
     if (this.readyState !== XMLHttpRequest.OPENED) {
       throw new Error("Failed to execute 'send' on 'XMLHttpRequest': The object's state must be OPENED.")
-    } else {
-      wx.request({
-        data,
-        url: _url.get(this),
-        method: _method.get(this),
-        header: _requestHeader.get(this),
-        responseType: this.responseType,
-        success: ({ data, statusCode, header }) => {
+  } else {
+      const url = _url.get(this)
+      const header = _requestHeader.get(this)
+      const responseType = this.responseType
+      const dataType = this.dataType
+
+      const relative = _isRelativePath(url)
+      let encoding;
+
+      if (responseType === 'arraybuffer') {
+          // encoding = 'binary'
+      } else {
+          encoding = 'utf8'
+      }
+
+      delete this.response;
+      this.response = null;
+
+      const onSuccess = ({ data, statusCode, header }) => {
+          statusCode = statusCode === undefined ? 200 : statusCode;
           if (typeof data !== 'string' && !(data instanceof ArrayBuffer)) {
-            try {
-              data = JSON.stringify(data)
-            } catch (e) {
-              data = data
-            }
+              try {
+                  data = JSON.stringify(data)
+              } catch (e) {
+                  data = data
+              }
           }
 
           this.status = statusCode
-          _responseHeader.set(this, header)
+          if (header) {
+              _responseHeader.set(this, header)
+          }
           _triggerEvent.call(this, 'loadstart')
           _changeReadyState.call(this, XMLHttpRequest.HEADERS_RECEIVED)
           _changeReadyState.call(this, XMLHttpRequest.LOADING)
@@ -114,29 +135,63 @@ export default class XMLHttpRequest {
           this.response = data
 
           if (data instanceof ArrayBuffer) {
-            this.responseText = ''
-            const bytes = new Uint8Array(data)
-            const len = bytes.byteLength
-
-            for (let i = 0; i < len; i++) {
-              this.responseText += String.fromCharCode(bytes[i])
-            }
+              Object.defineProperty(this, 'responseText', {
+                  enumerable: true,
+                  configurable: true,
+                  get: function() {
+                      throw new Error("InvalidStateError : responseType is " + this.responseType);
+                  }
+              });
           } else {
-            this.responseText = data
+              this.responseText = data
           }
           _changeReadyState.call(this, XMLHttpRequest.DONE)
           _triggerEvent.call(this, 'load')
           _triggerEvent.call(this, 'loadend')
-        },
-        fail: ({ errMsg }) => {
+      }
+
+      const onFail = ({ errMsg }) => {
           // TODO 规范错误
+
           if (errMsg.indexOf('abort') !== -1) {
-            _triggerEvent.call(this, 'abort')
+              _triggerEvent.call(this, 'abort')
           } else {
-            _triggerEvent.call(this, 'error', errMsg)
+              _triggerEvent.call(this, 'error', {
+                  message: errMsg
+              })
           }
           _triggerEvent.call(this, 'loadend')
-        }
+
+          if (relative) {
+              // 用户即使没监听error事件, 也给出相应的警告
+              console.warn(errMsg)
+          }
+      }
+
+      if (relative) {
+          const fs = wx.getFileSystemManager();
+
+          let options = {
+              'filePath': url,
+              'success': onSuccess,
+              'fail': onFail
+            }
+          if (encoding) {
+              options.encoding = encoding;
+          }
+          fs.readFile(options)
+          return
+      }
+
+      wx.request({
+          data,
+          url: url,
+          method: _method.get(this),
+          header: header,
+          dataType: dataType,
+          responseType: responseType,
+          success: onSuccess,
+          fail: onFail
       })
     }
   }
